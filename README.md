@@ -132,7 +132,7 @@ Inspired by the work of:
 - **forza-painter** by `the_adawg` (FH4/FH5 — MIT)
 - **geometrize-lib** by Sam Twidale (MIT)
 - **Primitive** by Michael Fogleman (MIT)
-- Special thanks to **bvzrays** for his help with vinyl group layers detection and color offsets in allocated memory. helped a lot! https://github.com/bvzrays
+- Special thanks to **bvzrays** for his help with color offsets in allocated memory. helped a lot! https://github.com/bvzrays
 
 FH6 vinyl-group memory layout was reverse-engineered from scratch for this project and is documented in [`fd6/inject/patterns/fh6_patterns.json`](fd6/inject/patterns/fh6_patterns.json) for community reuse.
 
