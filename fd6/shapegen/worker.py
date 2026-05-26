@@ -5,7 +5,8 @@ import numpy as np
 from PIL import Image
 from PySide6.QtCore import QObject, QThread, Signal
 
-from fd6.shapegen.engine import Engine, EngineConfig
+from fd6.shapegen.engine import EngineConfig
+from fd6.shapegen.gpu_engine import create_engine
 from fd6.shapegen.profile import Profile
 from fd6.io.exporter import save_json
 from fd6.io.json_schema import FD6Document
@@ -20,12 +21,22 @@ class GenerationWorker(QObject):
     error = Signal(str)
     checkpoint_written = Signal(str)    # checkpoint json path
 
-    def __init__(self, image_path: Path, profile: Profile, output_dir: Path | None = None, sticker_mode: bool = False) -> None:
+    def __init__(
+        self,
+        image_path: Path,
+        profile: Profile,
+        output_dir: Path | None = None,
+        sticker_mode: bool = False,
+        resume_json: Path | None = None,
+        stop_at_override: int | None = None,
+    ) -> None:
         super().__init__()
         self.image_path = Path(image_path)
         self.profile = profile
         self.output_dir = Path(output_dir) if output_dir else self.image_path.parent / self.image_path.stem
-        self.sticker_mode = sticker_mode  # When True, keep source alpha and skip transparent areas
+        self.sticker_mode = sticker_mode
+        self.resume_json = Path(resume_json) if resume_json else None
+        self.stop_at_override = stop_at_override
         self._engine: Engine | None = None
         self._paused = False
 
@@ -114,13 +125,25 @@ class GenerationWorker(QObject):
                     alpha_mask = np.asarray(am_img, dtype=np.uint8)
             target = np.asarray(img, dtype=np.uint8)
 
-            self._engine = Engine(target, EngineConfig(profile=self.profile), alpha_mask=alpha_mask)
+            profile = self.profile
+            if self.stop_at_override is not None:
+                from dataclasses import replace
+                profile = replace(profile, stop_at=self.stop_at_override)
+
+            self._engine = create_engine(target, EngineConfig(profile=profile), alpha_mask=alpha_mask)
+
+            if self.resume_json is not None:
+                from fd6.io.resume import load_resume
+                _, resume_shapes = load_resume(self.resume_json)
+                self._engine.seed_shapes(resume_shapes)
+                self.progress.emit(len(resume_shapes), profile.stop_at, self._engine.rms)
+
             stem = self.image_path.stem
             final_path = self.output_dir / f"{stem}.json"
 
             for event in self._engine.run():
                 if event.kind == "shape_committed":
-                    self.progress.emit(event.shape_count, self.profile.stop_at, event.rms)
+                    self.progress.emit(event.shape_count, profile.stop_at, event.rms)
                 elif event.kind == "preview" and event.canvas is not None:
                     self.preview.emit(event.canvas)
                 elif event.kind == "checkpoint":
@@ -129,7 +152,7 @@ class GenerationWorker(QObject):
                         source_image=self.image_path.name,
                         image_size=(target.shape[1], target.shape[0]),
                         shapes=self._engine.shapes,
-                        profile_name=self.profile.name,
+                        profile_name=profile.name,
                         sticker_mode=self.sticker_mode,
                     )
                     save_json(doc, cp_path)
@@ -142,7 +165,7 @@ class GenerationWorker(QObject):
                         source_image=self.image_path.name,
                         image_size=(target.shape[1], target.shape[0]),
                         shapes=self._engine.shapes,
-                        profile_name=self.profile.name,
+                        profile_name=profile.name,
                         sticker_mode=self.sticker_mode,
                     )
                     save_json(doc, final_path)

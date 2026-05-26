@@ -17,9 +17,10 @@ from fd6.gui.widgets.drop_zone import SUPPORTED_EXTS
 
 
 class UploadPanel(QWidget):
-    files_selected = Signal(list)        # list[Path] — image files chosen for generation
-    json_loaded = Signal(Path)           # User uploaded a JSON: load + show preview (do NOT inject)
-    download_json_requested = Signal()   # User wants to save the most-recent generated JSON
+    files_selected = Signal(list)               # list[Path] — image files chosen for generation
+    json_loaded = Signal(Path)                  # User uploaded a JSON: load + show preview (do NOT inject)
+    download_json_requested = Signal()          # User wants to save the most-recent generated JSON
+    continue_generation_requested = Signal(Path)  # User wants to continue from a completed JSON
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -56,6 +57,13 @@ class UploadPanel(QWidget):
         json_row.addWidget(self.upload_json_btn)
         json_row.addWidget(self.download_json_btn)
         layout.addLayout(json_row)
+
+        self.continue_btn = QPushButton("Continue Generation…")
+        self.continue_btn.setToolTip(
+            "Load a completed FD6 JSON and continue generating more shapes from where it left off."
+        )
+        self.continue_btn.clicked.connect(self._on_continue_clicked)
+        layout.addWidget(self.continue_btn)
 
         layout.addSpacing(4)
         # Label tracks which panel is showing — flips when Customizations
@@ -130,6 +138,13 @@ class UploadPanel(QWidget):
         )
         if path:
             self.json_loaded.emit(Path(path))
+
+    def _on_continue_clicked(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick FD6 shapes JSON to continue from", "", "FD6 shapes (*.json);;All files (*)"
+        )
+        if path:
+            self.continue_generation_requested.emit(Path(path))
 
     def _on_files_dropped(self, paths: list[Path]) -> None:
         self._emit(paths)

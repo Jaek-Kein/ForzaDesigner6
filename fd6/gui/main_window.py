@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self.upload.files_selected.connect(self._on_files_selected)
         self.upload.json_loaded.connect(self._on_json_loaded_for_preview)
         self.upload.download_json_requested.connect(self._on_download_json)
+        self.upload.continue_generation_requested.connect(self._on_continue_requested)
         self.settings_panel.start_clicked.connect(self._start_next)
         self.settings_panel.pause_clicked.connect(self._toggle_pause)
         self.settings_panel.stop_clicked.connect(self._stop_current)
@@ -89,6 +90,8 @@ class MainWindow(QMainWindow):
         self._loaded_json_path: Path | None = None    # JSON loaded via Upload JSON (ready to inject)
         self._inject_worker = None  # InjectionWorker (set when injecting)
         self._inject_thread: QThread | None = None
+        # Maps image_path → (resume_json, stop_at_override, sticker_mode) for queued resume jobs
+        self._pending_resume: dict[Path, tuple] = {}
 
         # Menus / shortcuts
         self._build_menus()
@@ -389,6 +392,8 @@ class MainWindow(QMainWindow):
             self.upload.upload_json_btn.setVisible(not is_ac)
         if hasattr(self.upload, "download_json_btn"):
             self.upload.download_json_btn.setVisible(not is_ac)
+        if hasattr(self.upload, "continue_btn"):
+            self.upload.continue_btn.setVisible(not is_ac)
         # Sync the radio group in the menu (in case suite changed via popup, not menu)
         if hasattr(self, "_suite_actions"):
             for m, act in self._suite_actions.items():
@@ -651,6 +656,13 @@ class MainWindow(QMainWindow):
         if next_path is None:
             self.statusBar().showMessage("Nothing queued.")
             return
+
+        # Resume job: use stored resume params instead of normal fresh generation.
+        if next_path in self._pending_resume:
+            resume_json, stop_at_override, sticker_mode = self._pending_resume.pop(next_path)
+            self._start_next_resume(next_path, resume_json, stop_at_override, sticker_mode)
+            return
+
         profile = self.settings_panel.build_profile()
         self._current_path = next_path
         self._current_profile = profile
@@ -882,6 +894,101 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Exported to {dest}", 6000)
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", f"{type(exc).__name__}: {exc}")
+
+    def _on_continue_requested(self, json_path: Path) -> None:
+        """User clicked Continue Generation — load a completed JSON and generate more shapes."""
+        from fd6.io.exporter import load_json
+        from PySide6.QtWidgets import QInputDialog, QFileDialog
+
+        try:
+            doc = load_json(str(json_path))
+        except Exception as exc:
+            QMessageBox.critical(self, "Load failed", f"{type(exc).__name__}: {exc}")
+            return
+
+        current_count = doc.shape_count or len(doc.shapes)
+
+        profile = self.settings_panel.build_profile()
+        more, ok = QInputDialog.getInt(
+            self, "Continue Generation",
+            f"이 JSON에는 {current_count}개의 shape이 있습니다.\n추가로 몇 개의 shape을 생성할까요?",
+            value=profile.stop_at,
+            min=1, max=20000,
+        )
+        if not ok:
+            return
+
+        stop_at_override = current_count + more
+
+        # Try to find the source image: typically at json_path.parent.parent / source_image
+        source_image_name = doc.source_image
+        candidate = json_path.parent.parent / source_image_name
+        if not candidate.exists():
+            candidate = json_path.parent / source_image_name
+        if not candidate.exists():
+            from fd6.gui.widgets.drop_zone import SUPPORTED_EXTS
+            exts = " ".join(f"*{e}" for e in sorted(SUPPORTED_EXTS))
+            img_path_str, _ = QFileDialog.getOpenFileName(
+                self,
+                f"원본 이미지 '{source_image_name}'을 찾을 수 없습니다. 직접 선택하세요.",
+                "",
+                f"Images ({exts});;All files (*)",
+            )
+            if not img_path_str:
+                return
+            candidate = Path(img_path_str)
+
+        sticker_mode = doc.sticker_mode
+        self.queue.add(candidate)  # adds with status "queued"
+
+        if self._worker is not None:
+            # Already running — the queued item will start after the current job.
+            # Store resume info so _start_next can pick it up.
+            self._pending_resume[candidate] = (json_path, stop_at_override, sticker_mode)
+            self.statusBar().showMessage(
+                f"큐에 추가됨: {candidate.name} (현재 작업 완료 후 이어서 생성)", 5000
+            )
+            return
+
+        self._start_next_resume(candidate, json_path, stop_at_override, sticker_mode)
+
+    def _start_next_resume(
+        self,
+        image_path: Path,
+        resume_json: Path,
+        stop_at_override: int,
+        sticker_mode: bool,
+    ) -> None:
+        """Start a resume worker directly (not via the normal queue pop)."""
+        if self._worker is not None:
+            return
+        profile = self.settings_panel.build_profile()
+        self._current_path = image_path
+        self._current_profile = profile
+        self.preview.set_source(image_path)
+        self.queue.set_status(image_path, "running")
+
+        self._worker = GenerationWorker(
+            image_path, profile,
+            sticker_mode=sticker_mode,
+            resume_json=resume_json,
+            stop_at_override=stop_at_override,
+        )
+        self._thread = QThread(self)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self.preview.on_progress)
+        self._worker.preview.connect(self.preview.on_preview)
+        self._worker.checkpoint_written.connect(
+            lambda p: self.statusBar().showMessage(f"Checkpoint: {p}", 4000)
+        )
+        self._worker.finished.connect(self._on_finished)
+        self._worker.error.connect(self._on_error)
+        self._thread.start()
+        self.settings_panel.set_running(True)
+        self.statusBar().showMessage(
+            f"이어서 생성 중: {image_path.name} ({stop_at_override}개 목표)"
+        )
 
     def _show_fh6_status(self) -> None:
         from fd6.inject import discovery as disc

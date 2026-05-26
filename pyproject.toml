@@ -15,6 +15,9 @@ dependencies = [
     "Pillow>=10.0.0",
 ]
 
+[project.optional-dependencies]
+gpu = ["pyopencl>=2024.1"]
+
 [project.scripts]
 fd6 = "fd6.app:main"
 
